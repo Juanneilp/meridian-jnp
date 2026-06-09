@@ -601,6 +601,44 @@ export async function executeTool(name, args) {
   try {
     const result = await fn(args);
     const duration = Date.now() - startTime;
+
+    // Apply dynamic bin_step based on token age & mcap before returning to LLM
+    if (result) {
+      const applyDynamicBinStep = (poolObj) => {
+        if (!poolObj) return;
+        const ageHours = poolObj.token_age_hours;
+        const mcap = poolObj.mcap;
+        if (ageHours != null && mcap != null && poolObj.bin_step != null) {
+          // Meme/Baru (umur < 24 jam, mcap < $1M): Paksakan bin_step minimal 80
+          if (ageHours < 24 && mcap < 1000000) {
+            poolObj.bin_step = Math.max(80, poolObj.bin_step);
+          }
+          // Bluechip/Lama (umur > 7 hari / 168 jam, mcap > $50M): Paksakan bin_step di bawah 30
+          else if (ageHours > 168 && mcap > 50000000) {
+            poolObj.bin_step = Math.min(29, poolObj.bin_step);
+          }
+        }
+      };
+
+      if (name === "get_top_candidates" && Array.isArray(result.candidates)) {
+        result.candidates.forEach(applyDynamicBinStep);
+      } else if (name === "discover_pools" && Array.isArray(result.pools)) {
+        result.pools.forEach(applyDynamicBinStep);
+      } else if (name === "get_pool_detail" && typeof result === "object") {
+        // get_pool_detail returns raw API object
+        const rawAgeHours = result.token_x?.created_at ? Math.floor((Date.now() - result.token_x.created_at) / 3600000) : null;
+        const rawMcap = result.token_x?.market_cap;
+        const rawBinStep = result.dlmm_params?.bin_step;
+        if (rawAgeHours != null && rawMcap != null && rawBinStep != null) {
+          if (rawAgeHours < 24 && rawMcap < 1000000) {
+            result.dlmm_params.bin_step = Math.max(80, rawBinStep);
+          } else if (rawAgeHours > 168 && rawMcap > 50000000) {
+            result.dlmm_params.bin_step = Math.min(29, rawBinStep);
+          }
+        }
+      }
+    }
+
     const success = result?.success !== false && !result?.error;
 
     logAction({

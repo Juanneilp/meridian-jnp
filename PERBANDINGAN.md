@@ -969,11 +969,11 @@ Tujuannya adalah: **Profit lebih tinggi, risiko lebih rendah, dan bot tidak muda
 **Solusi Mudah:** Tambahkan pengecekan sederhana di pipeline screening: "Jika harga SOL turun lebih dari 5% dalam 1 jam terakhir, berhentikan otomatis fungsi deploy selama 2 jam."
 **Keuntungan:** Mencegah bot "menangkap pisau jatuh" (catch a falling knife) dan menghemat modal saat market sedang tidak rasional.
 
-### 3. Dynamic Bin Step Berdasarkan Volatilitas
-**Masalah saat ini:** Agen sering diberi kebebasan memilih `bin_step` antara `minBinStep` dan `maxBinStep` tanpa aturan mekanis yang ketat.
-**Solusi Mudah:** Terapkan formula sederhana langsung di `executor.js` sebelum memanggil LLM, seperti yang disarankan di `meteora-dlmm-lp-skill`:
+### 3. Dynamic Bin Step Berdasarkan Volatilitas (✅ Sudah Diimplementasikan)
+**Apa itu:** Menyesuaikan kerapatan bin (bin_step) secara otomatis berdasarkan profil risiko token sebelum diberikan ke agen AI.
+**Penyelesaian Masalah:** Agen AI sering memilih `bin_step` yang tidak sesuai dengan karakteristik aset. Di file `executor.js`, kami menyuntikkan fungsi filter pada fungsi eksekusi untuk setiap data kandidat kolam (pool):
 - Jika Token Tipe "Meme/Baru" (umur < 24 jam, mcap < $1M): **Paksakan** `bin_step` minimal 80.
-- Jika Token Tipe "Bluechip/Lama" (umur > 7 hari, mcap > $50M): **Paksakan** `bin_step` di bawah 30.
+- Jika Token Tipe "Bluechip/Lama" (umur > 7 hari, mcap > $50M): **Paksakan** `bin_step` maksimal 29 (di bawah 30).
 **Keuntungan:** Mengurangi kesalahan agen AI dalam memilih kerapatan bin. Bin yang terlalu rapat di memecoin = cepat *Out of Range*. Bin terlalu lebar di bluechip = *fee* sangat kecil.
 
 ### 4. Pencegahan "Re-Deploy" Dendam (Revenge Trading Guard)
