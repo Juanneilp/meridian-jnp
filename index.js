@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { agentLoop } from "./agent.js";
 import { log } from "./logger.js";
 import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
-import { getWalletBalances } from "./tools/wallet.js";
+import { getWalletBalances, swapToken } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
 import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
@@ -162,6 +162,40 @@ function scheduleTrailingDropConfirmation(positionAddress) {
   }, TRAILING_DROP_CONFIRM_DELAY_MS);
 
   _trailingDropConfirmTimers.set(positionAddress, timer);
+}
+
+async function sweepDust() {
+  log("cron", "Starting sweep dust cycle");
+  try {
+    const balances = await getWalletBalances({});
+    const positionsData = await getMyPositions({ force: true, silent: true }).catch(() => null);
+    if (!balances || !balances.tokens) return;
+    
+    // Get all base_mints currently in open positions
+    const openMints = new Set();
+    if (positionsData?.positions) {
+      for (const p of positionsData.positions) {
+        if (p.base_mint) openMints.add(p.base_mint);
+      }
+    }
+
+    let sweptCount = 0;
+    for (const token of balances.tokens) {
+      // Exclude SOL
+      if (token.mint === "So11111111111111111111111111111111111111112" || token.symbol === "SOL") continue;
+      
+      // Value > $0.50 and no open position
+      if (token.usd > 0.50 && !openMints.has(token.mint)) {
+        log("cron", `Sweeping dust: ${token.symbol} ($${token.usd.toFixed(2)}) → SOL`);
+        await swapToken({ input_mint: token.mint, output_mint: "SOL", amount: token.balance });
+        sweptCount++;
+        await new Promise(r => setTimeout(r, 2000)); // avoid rate limits
+      }
+    }
+    log("cron", `Sweep dust completed. Swept ${sweptCount} token(s).`);
+  } catch (error) {
+    log("cron_error", `Sweep dust failed: ${error.message}`);
+  }
 }
 
 async function runBriefing() {
@@ -741,6 +775,11 @@ Summarize the current portfolio health, total fees earned, and performance of al
     await maybeRunMissedBriefing();
   }, { timezone: 'UTC' });
 
+  // Sweep dust every day at 00:00 UTC
+  const sweepDustTask = cron.schedule(`0 0 * * *`, async () => {
+    await sweepDust();
+  }, { timezone: 'UTC' });
+
   // Lightweight 30s PnL poller — updates trailing TP state between management cycles, no LLM
   let _pnlPollBusy = false;
   const pnlPollInterval = setInterval(async () => {
@@ -796,7 +835,7 @@ Summarize the current portfolio health, total fees earned, and performance of al
     }
   }, 30_000);
 
-  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog];
+  _cronTasks = [mgmtTask, screenTask, healthTask, briefingTask, briefingWatchdog, sweepDustTask];
   // Store interval ref so stopCronJobs can clear it
   _cronTasks._pnlPollInterval = pnlPollInterval;
   log("cron", `Cycles started — management every ${config.schedule.managementIntervalMin}m, screening every ${config.schedule.screeningIntervalMin}m`);

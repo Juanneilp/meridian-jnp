@@ -113,7 +113,8 @@ export async function recordPerformance(perf) {
     return;
   }
 
-  const pnl_usd = (perf.final_value_usd + perf.fees_earned_usd) - perf.initial_value_usd;
+  const ESTIMATED_GAS_FEE_USD = 0.10; // $0.05 * 2 for open and close
+  const pnl_usd = (perf.final_value_usd + perf.fees_earned_usd) - perf.initial_value_usd - ESTIMATED_GAS_FEE_USD;
   const pnl_pct = perf.initial_value_usd > 0
     ? (pnl_usd / perf.initial_value_usd) * 100
     : 0;

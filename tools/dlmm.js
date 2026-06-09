@@ -1604,6 +1604,7 @@ export async function closePosition({ position_address, reason }) {
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
           const refreshed = await getMyPositions({ force: true, silent: true });
+          if (refreshed?.error) throw new Error(refreshed.error);
           const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
           if (!stillOpen) {
             closedConfirmed = true;
@@ -1863,6 +1864,7 @@ export async function closePosition({ position_address, reason }) {
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         const refreshed = await getMyPositions({ force: true, silent: true });
+        if (refreshed?.error) throw new Error(refreshed.error);
         const stillOpen = refreshed?.positions?.some((p) => p.position === position_address);
         if (!stillOpen) {
           closedConfirmed = true;
