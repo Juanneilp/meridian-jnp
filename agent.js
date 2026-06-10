@@ -5,7 +5,7 @@ import { executeTool } from "./tools/executor.js";
 import { tools } from "./tools/definitions.js";
 
 const MANAGER_TOOLS  = new Set(["close_position", "claim_fees", "swap_token", "get_position_pnl", "get_my_positions", "get_wallet_balance"]);
-const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_top_candidates", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
+const SCREENER_TOOLS = new Set(["deploy_position", "check_smart_wallets_on_pool", "get_token_holders", "get_token_narrative", "get_token_info", "search_pools", "get_pool_memory", "get_wallet_balance", "get_my_positions"]);
 const GENERAL_INTENT_ONLY_TOOLS = new Set([
   "self_update",
   "update_config",
@@ -383,6 +383,11 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
         // For close/swap: only lock on success so genuine failures can be retried
         if (NO_RETRY_TOOLS.has(functionName)) firedOnce.add(functionName);
         else if (ONCE_PER_SESSION.has(functionName) && result.success === true) firedOnce.add(functionName);
+
+        // If a tool automatically swapped the token (e.g. close_position dust sweeping), block manual swap_token
+        if (result && result.auto_swapped) {
+          firedOnce.add("swap_token");
+        }
 
         return {
           role: "tool",

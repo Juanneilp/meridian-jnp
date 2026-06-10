@@ -981,10 +981,567 @@ Tujuannya adalah: **Profit lebih tinggi, risiko lebih rendah, dan bot tidak muda
 **Solusi Mudah:** Perkuat sistem cooldown agar mengecek berdasarkan **Mint Address Token**, bukan hanya alamat pool. Jika token X baru saja membuat bot rugi/stop-loss, blokir token X tersebut selama 24 jam penuh di semua pool.
 **Keuntungan:** Mencegah bot dipermainkan oleh token yang sama berulang-ulang.
 
-### 5. Pencatatan PnL Netto yang Lebih Jujur
+### 5. Pencatatan PnL Netto yang Lebih Jujur (✅ Sudah Diimplementasikan)
 **Masalah saat ini:** Di `lessons.js`, PnL dihitung dari `(final_value_usd + fees_earned_usd) - initial_value_usd`. Namun, **gas fee** dan **priority fee** tidak dihitung. Pada modal kecil (< 0.5 SOL), gas fee bisa menggerus keuntungan.
 **Solusi Mudah:** Di `recordPerformance()`, kurangi PnL dengan estimasi biaya transaksi (misal flat $0.05 per transaksi * 2 untuk open/close).
 **Keuntungan:** Bot (dan agen AI) akan belajar bahwa *take profit* terlalu kecil ($0.10) sebenarnya adalah kerugian karena habis di ongkos gas. Agen akan menjadi lebih sabar.
 
 **Kesimpulan:** 
 Untuk meningkatkan performa *meridian-main* Anda tanpa membuatnya rumit, prioritas utamanya bukanlah menambah LLM baru atau dashboard mewah, melainkan **memperketat manajemen risiko mekanis** (Circuit Breaker, Dust Sweeping, Revenge Guard) agar modal tidak bocor secara diam-diam.
+
+---
+
+## Bagian 9 — Memaksimalkan LLM Murah/Flash untuk Meridian (Panduan Lengkap)
+
+> **Konteks:** Anda menggunakan `deepseek/deepseek-v4-flash` via OpenRouter sebagai otak keputusan bot LP ini. Model flash/murah sangat efisien secara biaya (penting untuk bot 24/7), tetapi rentan halusinasi, lemah di penalaran abstrak, dan mudah bingung jika diberikan terlalu banyak konteks sekaligus. Bagian ini menjelaskan cara **memeras performa maksimal** dari model murah tanpa mengganti ke model mahal.
+
+### Filosofi Utama: "LLM sebagai Eksekutor, Bukan Analis"
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ ARSITEKTUR KEPUTUSAN MERIDIAN-MAIN                              │
+│                                                                 │
+│   DATA MENTAH                                                   │
+│   (API Meteora, GMGN, Jupiter)                                  │
+│          │                                                      │
+│          ▼                                                      │
+│   ┌─────────────────┐     ← KODE JavaScript melakukan:          │
+│   │  HARD FILTERS   │       - Filter TVL, Volume, Organic       │
+│   │  (screening.js, │       - Block bot holders > 30%            │
+│   │   index.js,     │       - Block launchpad tertentu           │
+│   │   executor.js)  │       - Block bin_step di luar range       │
+│   └────────┬────────┘       - Block PVP symbols                  │
+│            │                                                    │
+│            ▼                                                    │
+│   ┌─────────────────┐     ← KODE JavaScript melakukan:          │
+│   │   ENRICHMENT    │       - Fetch smart wallets                │
+│   │   (index.js     │       - Fetch narrative                    │
+│   │    screening    │       - Fetch token info + audit           │
+│   │    cycle)       │       - Pre-fetch active_bin               │
+│   └────────┬────────┘       - Compute bins_below formula         │
+│            │                                                    │
+│            ▼                                                    │
+│   ┌─────────────────┐     ← LLM HANYA melakukan:               │
+│   │   LLM DECISION  │       - Pilih 1 dari 2-5 kandidat         │
+│   │   (prompt.js +  │       - Evaluasi narrative quality         │
+│   │    agent.js)    │       - Call deploy_position               │
+│   └─────────────────┘       - Tulis laporan singkat              │
+│                                                                 │
+│   ┌─────────────────┐     ← KODE JavaScript melakukan:          │
+│   │   MANAGEMENT    │       - Stop loss (deterministik)          │
+│   │   (index.js     │       - Take profit (deterministik)        │
+│   │    getDetermini │       - OOR close (deterministik)          │
+│   │    sticClose    │       - Low yield close (deterministik)    │
+│   │    Rule)        │       - LLM hanya dipanggil jika ada       │
+│   └─────────────────┘         action (bukan STAY)               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Insight kunci:** Semakin banyak keputusan yang bisa dipindahkan ke JavaScript (deterministik), semakin sedikit beban di LLM, dan semakin kecil peluang kesalahan. Model murah paling optimal jika hanya diminta membuat 1-2 keputusan sederhana per siklus.
+
+---
+
+### Strategi 1: Turunkan Temperature ke Titik Analitis
+
+**Apa itu Temperature?**
+Temperature mengontrol "keacakan" output LLM. Semakin tinggi (misal 0.7-1.0), semakin kreatif dan tak terprediksi. Semakin rendah (misal 0.1-0.2), semakin deterministik dan konsisten.
+
+**Untuk trading bot, kita butuh AI yang kaku dan kalkulatif, bukan kreatif.**
+
+**Implementasi di `user-config.json`:**
+```json
+{
+  "temperature": 0.1
+}
+```
+
+**Lokasi kode:** File `config.js` baris 141:
+```javascript
+// config.js
+llm: {
+  temperature: u.temperature ?? 0.373,  // ← default 0.373
+  // ...
+}
+```
+
+File `agent.js` baris 211 — temperature dipakai saat API call:
+```javascript
+// agent.js
+const reqParams = {
+  model: usedModel,
+  messages,
+  tools: getToolsForRole(agentType, goal),
+  temperature: config.llm.temperature,  // ← dipakai di sini
+  max_tokens: maxOutputTokens ?? config.llm.maxTokens,
+};
+```
+
+**Kenapa 0.1?**
+- Di temperature 0.1, DeepSeek-v4-flash akan **hampir selalu** memberikan jawaban yang sama untuk input yang sama.
+- Ini menghilangkan perilaku "mood swing" di mana kadang bot deploy, kadang skip, untuk kandidat yang identik.
+- Untuk penalaran analitis (bukan generasi teks kreatif), temperature rendah terbukti lebih akurat.
+
+> **⚠️ PENTING:** Jangan set temperature ke 0.0 karena beberapa provider (termasuk OpenRouter) bisa error atau menghasilkan output repetitif/stuck. Nilai 0.1 adalah sweet spot.
+
+---
+
+### Strategi 2: Perketat Hard Filter di JavaScript (Kurangi Beban LLM)
+
+**Prinsip:** Semakin sedikit kandidat yang sampai ke LLM, semakin akurat keputusannya.
+
+Model murah akan bingung jika disodori 10 kandidat sekaligus dan diminta memilih. Tapi jika hanya 2-3 kandidat yang **semuanya sudah layak**, bahkan model paling murah pun bisa memilih dengan benar.
+
+**Implementasi di `user-config.json`:**
+```json
+{
+  "minFeeActiveTvlRatio": 0.2,
+  "minOrganic": 65,
+  "minQuoteOrganic": 65,
+  "minHolders": 1000,
+  "minMcap": 200000,
+  "minTokenFeesSol": 30,
+  "maxTop10Pct": 55,
+  "maxBotHoldersPct": 25,
+  "minVolume": 2000
+}
+```
+
+**Apa efeknya?**
+| Parameter | Default | Recommended | Efek |
+|---|---|---|---|
+| `minFeeActiveTvlRatio` | 0.05 | 0.2+ | Hanya pool dengan fee tinggi yang lolos |
+| `minOrganic` | 60 | 65+ | Buang pool dengan aktivitas bot/fake |
+| `minHolders` | 500 | 1000+ | Hanya token dengan komunitas nyata |
+| `maxBotHoldersPct` | 30 | 25 | Lebih agresif blok token bot-heavy |
+| `maxTop10Pct` | 60 | 55 | Hindari whale-dominated tokens |
+| `minVolume` | 500 | 2000+ | Pastikan ada volume nyata |
+| `minMcap` | 150000 | 200000+ | Hindari ultra-micro cap |
+
+**Lokasi kode:** File `index.js` fungsi `runScreeningCycle()` (baris 419-738).
+Sebelum data sampai ke LLM, kode JavaScript sudah melakukan filter bertingkat:
+1. `getTopCandidates()` di `screening.js` — filter awal berdasarkan config
+2. Launchpad filter di `index.js` baris 507-527
+3. Bot holder filter di `index.js` baris 519-526
+4. Lone candidate quality check di `getLoneCandidateSkipReason()` baris 1691-1711
+
+Semakin ketat parameter ini, semakin sedikit sampah yang sampai ke LLM.
+
+---
+
+### Strategi 3: Gunakan Sistem Lesson (Memori) Secara Agresif
+
+**Apa itu?**
+Sistem `lessons.js` adalah memori permanen bot. Setiap lesson yang di-pin akan **selalu disuntikkan** ke dalam system prompt LLM di setiap siklus. Ini adalah cara paling ampuh untuk "mengajarkan" model murah tanpa mengubah kode.
+
+**Kenapa penting untuk model murah?**
+Model murah tidak bisa "bernalar dari prinsip pertama" (first-principle reasoning). Mereka butuh instruksi eksplisit. Kata kunci `CRITICAL`, `NEVER`, `ALWAYS`, `MUST` sangat efektif karena model flash dilatih untuk mematuhi instruksi tegas.
+
+**Cara menambah lesson via terminal:**
+```bash
+cd /root/meridian-main
+
+# Contoh 1: Lesson tentang single-sided deploy
+node -e 'import("./lessons.js").then(m => {
+  m.addLesson(
+    "CRITICAL: This bot ONLY deposits SOL. Never claim Bid-Ask splits capital into 2 tokens. All shapes distribute 100% SOL single-sided below active price.",
+    ["strategy", "single_sided"],
+    { pinned: true, role: null }
+  );
+  console.log("Done");
+}).catch(console.error);'
+
+# Contoh 2: Lesson tentang minimal holding time
+node -e 'import("./lessons.js").then(m => {
+  m.addLesson(
+    "RULE: Never close a position within 30 minutes of opening unless stop-loss is hit. Young positions need time to earn fees.",
+    ["management", "patience"],
+    { pinned: true, role: "MANAGER" }
+  );
+  console.log("Done");
+}).catch(console.error);'
+
+# Contoh 3: Lesson tentang narrative
+node -e 'import("./lessons.js").then(m => {
+  m.addLesson(
+    "SCREENING: Tokens with no narrative AND no smart wallets are NEVER worth deploying, even if metrics look good. Skip immediately.",
+    ["screening", "narrative"],
+    { pinned: true, role: "SCREENER" }
+  );
+  console.log("Done");
+}).catch(console.error);'
+```
+
+**Atau via Telegram (jika sudah terhubung):**
+```
+/teach CRITICAL: Always prefer pools with smart wallet confirmation over pools without.
+```
+
+**Tips menulis lesson yang efektif untuk model murah:**
+1. **Gunakan kata imperatif:** `MUST`, `NEVER`, `ALWAYS`, `CRITICAL`, `RULE`
+2. **Satu lesson = satu aturan.** Jangan gabungkan 3 aturan dalam 1 lesson.
+3. **Spesifik, bukan abstrak.** ❌ "Hati-hati dengan pool baru" → ✅ "NEVER deploy to pools with organic_score below 60"
+4. **Maks 400 karakter** per lesson (batas di `lessons.js` baris 34).
+5. **Pin lesson penting** agar selalu dimuat (lesson tidak di-pin bisa tertimpa oleh yang lebih baru).
+6. **Gunakan role** agar lesson hanya dimuat di siklus yang relevan:
+   - `role: "SCREENER"` → hanya dimuat saat screening
+   - `role: "MANAGER"` → hanya dimuat saat management
+   - `role: null` → dimuat di semua siklus (GENERAL)
+
+**Lokasi kode:**
+- Lesson dimuat di `agent.js` baris 162: `const lessons = getLessonsForPrompt({ agentType });`
+- Lesson disuntikkan ke prompt di `prompt.js` baris 33, 56, 128
+- Tiering: PINNED (selalu muncul) → ROLE-MATCHED → RECENT (file `lessons.js` baris 609-675)
+
+**Cap per role:**
+| Role | Pinned Cap | Role Cap | Total Cap |
+|---|---|---|---|
+| SCREENER/MANAGER | 5 | 6 | 10 |
+| GENERAL | 10 | 15 | 35 |
+
+> **⚠️ JANGAN terlalu banyak lesson.** Jika total lesson terlalu banyak, token budget prompt akan membesar, model murah jadi lambat dan mahal. Idealnya **5-10 pinned lesson** yang sangat spesifik.
+
+---
+
+### Strategi 4: Pindahkan Logika Matematis ke JavaScript (Jangan Biarkan LLM Hitung)
+
+**Masalah:** Model flash sangat buruk dalam aritmatika. Jika Anda meminta model menghitung "berapa bins_below optimal untuk volatility 3.2?", hasilnya sering salah.
+
+**Solusi:** Meridian sudah melakukan ini sebagian besar. Berikut peta logika yang sudah deterministik (di JavaScript) vs yang masih di LLM:
+
+| Keputusan | Handler | Deterministik? |
+|---|---|---|
+| Stop Loss (PnL ≤ -30%) | `getDeterministicCloseRule()` di `index.js:924` | ✅ Ya, di JS |
+| Take Profit (PnL ≥ 5%) | `getDeterministicCloseRule()` di `index.js:927` | ✅ Ya, di JS |
+| OOR Close (> 30 menit) | `getDeterministicCloseRule()` di `index.js:937` | ✅ Ya, di JS |
+| Low Yield Close | `getDeterministicCloseRule()` di `index.js:945` | ✅ Ya, di JS |
+| Trailing TP | `updatePnlAndCheckExits()` di `state.js` | ✅ Ya, di JS |
+| Hitung bins_below | `computeBinsBelow()` di `index.js:1713` | ✅ Ya, di JS |
+| Deploy amount | `computeDeployAmount()` di `config.js:220` | ✅ Ya, di JS |
+| Dynamic bin_step | `applyDynamicBinStep()` di `executor.js:607` | ✅ Ya, di JS |
+| Bot/Launchpad filter | `runScreeningCycle()` hard filters | ✅ Ya, di JS |
+| Lone candidate skip | `getLoneCandidateSkipReason()` di `index.js:1691` | ✅ Ya, di JS |
+| **Pilih pool mana?** | LLM di `agentLoop()` | ❌ Di LLM |
+| **Evaluasi narrative** | LLM di `agentLoop()` | ❌ Di LLM |
+| **Evaluasi instruction** | LLM di management cycle | ❌ Di LLM |
+
+**Kunci:** LLM hanya diminta melakukan **3 hal** yang memang butuh "kecerdasan":
+1. Memilih pool terbaik dari kandidat yang sudah lolos filter
+2. Mengevaluasi kualitas narrative (apakah token punya cerita nyata)
+3. Mengevaluasi instruksi custom user (misal "close at 5% profit")
+
+**Rekomendasi tambahan jika ingin mengurangi peran LLM lebih jauh:**
+
+Anda bisa menambahkan hard filter di JavaScript untuk narrative quality. Contoh di `index.js` sebelum LLM dipanggil:
+```javascript
+// Tambahkan di index.js setelah baris 527 (setelah bot filter)
+// Auto-skip candidates tanpa narrative DAN tanpa smart wallets
+const passing2 = passing.filter(({ pool, sw, n }) => {
+  const hasNarrative = !!n?.narrative;
+  const hasSmartWallets = (sw?.in_pool?.length ?? 0) > 0;
+  if (!hasNarrative && !hasSmartWallets) {
+    log("screening", `Auto-skipped ${pool.name} — no narrative, no smart wallets`);
+    return false;
+  }
+  return true;
+});
+```
+
+Dengan ini, LLM tidak perlu lagi membuang step untuk mengevaluasi kandidat yang jelas-jelas tidak layak.
+
+---
+
+### Strategi 5: Fokuskan pada Satu Strategi (Jangan Beri Terlalu Banyak Pilihan)
+
+**Masalah:** File `strategy-library.json` berisi 5+ strategi berbeda (Custom Ratio Spot, Single-Sided Reseed, Fee Compounding, Multi-Layer, Partial Harvest). Jika LLM diminta memilih strategi **dan** memilih pool **dan** menentukan parameter, bebannya terlalu berat untuk model flash.
+
+**Solusi:** Kunci strategi ke satu pilihan dan biarkan kode yang menentukan parameternya.
+
+**Implementasi di `user-config.json`:**
+```json
+{
+  "strategy": "spot"
+}
+```
+
+Strategi sudah di-hardcode di screening cycle (`index.js` baris 478-480):
+```javascript
+const deployStrategy = config.strategy.strategy;
+const strategyBlock = `DEPLOY STRATEGY: ${deployStrategy} (from config)
+  | bins_above: 0 (FIXED — never change)
+  | deposit: SOL only (amount_y, amount_x=0)`;
+```
+
+**Ini artinya:**
+- LLM **tidak perlu memilih** antara Spot, Bid-Ask, atau Curve
+- Kode sudah memaksakan `bins_above = 0` dan `amount_x = 0`
+- LLM tinggal memilih **pool mana** dan **memanggil deploy_position**
+
+> **💡 Tips:** Jika Anda ingin bereksperimen dengan strategi lain (misal Bid-Ask), ubah `"strategy": "bid_ask"` di `user-config.json`. Tapi **jangan biarkan LLM yang memilih** strategi mana yang dipakai — ini terlalu abstrak untuk model flash.
+
+---
+
+### Strategi 6: Optimalkan Prompt agar Ringkas dan Terstruktur
+
+**Masalah:** System prompt yang terlalu panjang membuat model flash kehilangan fokus. Model murah punya "attention window" yang lebih lemah — informasi di awal prompt bisa "dilupakan" jika prompt terlalu panjang.
+
+**Kenapa MANAGER prompt sudah optimal:**
+Perhatikan di `prompt.js` baris 18-34 — prompt MANAGER sangat ringkas:
+```javascript
+if (agentType === "MANAGER") {
+  return `You are an autonomous DLMM LP agent...
+This is a mechanical rule-application task.
+All position data is pre-loaded.
+Apply the close/claim rules directly and output the report.
+No extended analysis or deliberation required.
+...`;
+}
+```
+
+Kalimat "**mechanical rule-application task**" dan "**No extended analysis or deliberation required**" sangat penting untuk model murah — ini memberitahu model bahwa tugasnya sederhana dan tidak perlu "berpikir terlalu dalam".
+
+**Kenapa SCREENER prompt juga sudah cukup baik:**
+Di `prompt.js` baris 98-129, SCREENER prompt sudah memiliki:
+- Aturan eksplisit: `fees_sol < X → SKIP`
+- Formula bins_below yang sudah ditulis: `bins_below = round(minBins + (volatility/5)*(maxBins-minBins))`
+- Instruksi format output yang ketat (report template)
+
+**Tips tambahan untuk model murah:**
+1. **Jangan minta LLM menulis esai.** Batas `maxTokens` di 2048 sudah baik. Jangan naikkan ke 4096 kecuali untuk GENERAL (chat interaktif).
+2. **Format output ketat** — template report di screening cycle (baris 647-693 di `index.js`) memaksa LLM mengikuti format, bukan berimprovisasi.
+3. **Gunakan `maxSteps` yang wajar.** Default 20 sudah baik. Untuk model murah, 15 mungkin lebih aman karena semakin banyak step, semakin besar peluang halusinasi.
+
+**Implementasi:**
+```json
+{
+  "maxTokens": 2048,
+  "maxSteps": 15
+}
+```
+
+---
+
+### Strategi 7: Manfaatkan Sistem Darwinian Signal Weights
+
+**Apa itu?**
+File `signal-weights.js` mengimplementasikan sistem evolusioner: sinyal screening (organic_score, fee_tvl_ratio, volume, dll.) yang **sering muncul di posisi yang profit** akan mendapat bobot lebih tinggi. Yang sering muncul di posisi rugi, bobotnya turun.
+
+**Kenapa penting untuk model murah?**
+Bobot sinyal disuntikkan ke prompt SCREENER (di `prompt.js` baris 128):
+```javascript
+${weightsSummary ? `${weightsSummary}\nPrioritize candidates whose strongest
+ attributes align with high-weight signals.\n\n` : ""}
+```
+
+Contoh output yang dilihat LLM:
+```
+Signal Weights (Darwinian — learned from past positions):
+  fee_tvl_ratio            1.15  ####......  [above avg]
+  smart_wallets_present    1.10  ####......  [above avg]
+  organic_score            0.95  ###.......  [neutral]
+  volume                   0.85  ##........  [neutral]
+  mcap                     0.60  #.........  [below avg]
+```
+
+Model murah **sangat patuh** pada daftar terstruktur seperti ini. Jika `fee_tvl_ratio` bertuliskan `[STRONG]` dan `mcap` bertuliskan `[weak]`, model flash akan secara konsisten memprioritaskan fee/TVL di atas market cap.
+
+**Implementasi di `user-config.json`:**
+```json
+{
+  "darwinEnabled": true,
+  "darwinWindowDays": 60,
+  "darwinRecalcEvery": 5,
+  "darwinMinSamples": 10
+}
+```
+
+> **⚠️ CATATAN:** Darwin membutuhkan minimal 10 posisi yang sudah di-close (`darwinMinSamples: 10`) sebelum mulai menghitung bobot. Di awal, semua sinyal bobotnya 1.0 (netral). Setelah cukup data, sistem akan otomatis menyesuaikan.
+
+---
+
+### Strategi Bonus: Multi-Model Split (Model Berbeda untuk Tugas Berbeda)
+
+**Apa itu?**
+Meridian mendukung penggunaan model LLM yang berbeda untuk setiap role:
+
+```json
+{
+  "managementModel": "deepseek/deepseek-v4-flash",
+  "screeningModel": "deepseek/deepseek-v4-flash",
+  "generalModel": "openai/gpt-oss-120b:free"
+}
+```
+
+**Lokasi kode:** `config.js` baris 144-146:
+```javascript
+llm: {
+  managementModel: u.managementModel ?? process.env.LLM_MODEL,
+  screeningModel:  u.screeningModel  ?? process.env.LLM_MODEL,
+  generalModel:    u.generalModel    ?? process.env.LLM_MODEL,
+}
+```
+
+**Cara kerjanya:**
+- `managementModel` → dipanggil saat management cycle (close/claim decisions)
+- `screeningModel` → dipanggil saat screening cycle (pilih pool + deploy)
+- `generalModel` → dipanggil saat user chat via Telegram
+
+**Rekomendasi konfigurasi:**
+
+| Role | Rekomendasi Model | Alasan |
+|---|---|---|
+| `managementModel` | Model flash/murah | Keputusan management sudah 90% deterministik di JS. LLM hanya eksekutor. |
+| `screeningModel` | Model flash/murah ATAU model sedang | Ini role terpenting — pilih pool. Model sedikit lebih pintar bisa membantu. |
+| `generalModel` | Model gratis/murah | Hanya untuk chat interaktif, tidak kritis. |
+
+**Contoh konfigurasi hemat:**
+```json
+{
+  "managementModel": "deepseek/deepseek-v4-flash",
+  "screeningModel": "deepseek/deepseek-v4-flash",
+  "generalModel": "openai/gpt-oss-120b:free"
+}
+```
+
+**Contoh konfigurasi hybrid (sedikit lebih mahal, screening lebih pintar):**
+```json
+{
+  "managementModel": "deepseek/deepseek-v4-flash",
+  "screeningModel": "deepseek/deepseek-chat",
+  "generalModel": "deepseek/deepseek-v4-flash"
+}
+```
+
+---
+
+### Rangkuman: Checklist Optimasi LLM Murah
+
+| # | Aksi | File | Prioritas | Status |
+|---|---|---|---|---|
+| 1 | Set `temperature: 0.1` | `user-config.json` | 🔴 Kritis | ✅ Sudah |
+| 2 | Perketat screening threshold | `user-config.json` | 🔴 Kritis | ⚠️ Review |
+| 3 | Pin 5-10 lesson kritis | `lessons.json` via terminal | 🔴 Kritis | ⚠️ Ongoing |
+| 4 | Set `maxSteps: 15` | `user-config.json` | 🟡 Penting | Opsional |
+| 5 | Kunci 1 strategi (`strategy: "spot"`) | `user-config.json` | 🟡 Penting | ✅ Sudah |
+| 6 | Aktifkan Darwin weights | `user-config.json` | 🟢 Bagus | ✅ Sudah |
+| 7 | Multi-model split | `user-config.json` | 🟢 Bagus | ✅ Sudah |
+| 8 | Tambah hard filter narrative+SW di JS | `index.js` | 🟢 Bonus | Belum |
+
+### Penutup
+
+**Kesimpulan akhir:** Model LLM murah seperti DeepSeek-v4-flash **bukan masalah** jika arsitektur keputusan Anda dirancang dengan benar. Kunci utamanya:
+
+1. **JavaScript = Polisi.** Semua aturan yang bisa dihitung (stop loss, take profit, OOR, yield check) harus di-hardcode di JS. Jangan andalkan LLM untuk matematika.
+2. **LLM = Hakim.** LLM hanya diminta membuat keputusan "judgement call" yang memang butuh kecerdasan: evaluasi narrative, pilih pool terbaik dari yang sudah lolos filter.
+3. **Lesson = Hukum.** Pinned lessons adalah "undang-undang" yang memaksa model murah berperilaku konsisten. Tanpa lesson, model flash akan berubah-ubah keputusannya.
+4. **Data = Makanan.** Semakin bersih data yang sampai ke LLM (sudah difilter ketat di JS), semakin akurat keputusannya. Garbage in = garbage out, terutama untuk model murah.
+
+Dengan menerapkan 7 strategi di atas, performa DeepSeek-v4-flash di Meridian bisa **mendekati** model mahal seperti GPT-4o atau Claude Sonnet — karena sebagian besar "kecerdasan" sebenarnya sudah ada di kode JavaScript, bukan di LLM.
+
+---
+
+## Bagian 10 — Memindahkan Beban dari Lessons ke JavaScript (Menghemat Prompt)
+
+> **Pertanyaan Penting:** *"Karena slot lesson sangat terbatas (hanya 5 slot Pinned per siklus), aturan apa saja yang BISA dan SEHARUSNYA dipindahkan ke JavaScript (hardcode) alih-alih dijadikan lesson?"*
+
+Slot lesson adalah real estate paling berharga di LLM prompt. Jangan buang slot lesson untuk aturan yang bisa **dipaksakan secara matematis** di level kode. Model LLM murah (*DeepSeek-v4-flash*) sering mengabaikan instruksi teks panjang, tapi mereka **tidak bisa** melanggar kode JavaScript yang memblokir eksekusinya.
+
+### 1. Apa yang SUDAH Berhasil Dipindahkan ke JS di Meridian-Main?
+
+Kode Anda di `tools/executor.js` dan `index.js` saat ini **sudah sangat solid**. Berikut hal-hal yang **tidak perlu** Anda buatkan lesson karena sudah di-block paksa oleh JavaScript:
+
+- ❌ **"Jangan pakai 2 sisi (Bid-Ask), pakai 1 sisi (Spot) saja."**
+  - **Di JS:** `executor.js` baris 737 memblokir transaksi jika `amount_x > 0`. Transaksi akan ditolak sebelum sampai ke Solana.
+- ❌ **"Jangan pasang bins di atas harga."**
+  - **Di JS:** `executor.js` baris 784 menolak transaksi jika `bins_above !== 0` untuk single-sided deploy.
+- ❌ **"Jangan deploy ke pool sampah yang bot-nya banyak."**
+  - **Di JS:** `index.js` baris 519 sudah mem-filter kandidat sebelum datanya dikirim ke LLM. LLM tidak akan pernah melihat kandidat ini.
+- ❌ **"Close posisi kalau rugi -30%."**
+  - **Di JS:** Fungsi `getDeterministicCloseRule()` di `index.js` baris 924 otomatis mendeteksi rugi -30% dan menginstruksikan close *tanpa* harus bertanya ke LLM.
+
+### 2. Aturan yang HARUS Segera Dipindahkan ke JS (Menghemat 3 Slot Lesson)
+
+Berdasarkan audit pada kode, ada 3 perilaku di mana LLM murah sering membuat kesalahan, namun saat ini kita harus membuang slot lesson untuk memperbaikinya. Ini harusnya dipindahkan ke JavaScript!
+
+#### A. Memaksa `deploy_amount` Sesuai Config
+**Masalah:** LLM murah sering mengarang angka `amount_y` saat memanggil tool `deploy_position` (misal disuruh 0.15 SOL, malah input 0.5 SOL).
+**Cara salah (menggunakan lesson):** "CRITICAL: deploy_position amount_y MUST match exactly 0.15 SOL." (Membuang 1 slot lesson).
+**Cara JUNIOR DEV (Hardcode di JS):**
+Abaikan input `amount_y` dari LLM sepenuhnya. Di `executor.js` fungsi `deploy_position`, paksa nilainya menggunakan config.
+
+**Implementasi:**
+Di `tools/executor.js` baris 735:
+```javascript
+// SEBELUMNYA: Percaya pada input LLM
+// const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
+
+// SESUDAHNYA: Abaikan input LLM, paksa ambil dari dompet / config
+const currentBalance = await getWalletBalances();
+const deployAmountY = computeDeployAmount(currentBalance.sol);
+args.amount_y = deployAmountY; // Paksa timpa argumen dari LLM
+args.amount_sol = deployAmountY;
+```
+**Efek:** LLM mau menginput 1000 SOL pun, sistem akan tetap deploy 0.15 SOL. Slot lesson aman!
+
+#### B. Mencegah LLM Memanggil Tool yang Tidak Perlu (`get_active_bin`)
+**Masalah:** Di siklus screening, data `active_bin` **sudah** disertakan di prompt untuk setiap pool. Tapi LLM murah kadang masih iseng memanggil tool `get_active_bin`, membuang 1 turn (dan waktu).
+**Cara salah (menggunakan lesson):** "RULE: Do not call get_active_bin, it is already provided."
+**Cara JUNIOR DEV (Hardcode di JS):**
+Hapus tool tersebut dari daftar alat yang boleh dipakai oleh SCREENER.
+
+**Implementasi:**
+Di `agent.js` baris 8:
+```javascript
+// SEBELUMNYA:
+// const SCREENER_TOOLS = new Set(["deploy_position", "get_active_bin", "get_top_candidates", ...]);
+
+// SESUDAHNYA: Hapus "get_active_bin" dan "get_top_candidates" karena data ini SUDAH di-load di index.js sebelum LLM dipanggil.
+const SCREENER_TOOLS = new Set(["deploy_position", "check_smart_wallets_on_pool", "get_token_narrative", ...]);
+```
+**Efek:** Jika LLM mencoba memanggil `get_active_bin`, tool itu tidak akan tersedia. LLM terpaksa langsung memanggil `deploy_position`. Bot berjalan 2x lebih cepat.
+
+#### C. Mencegah LLM Melakukan Double-Swap
+**Masalah:** Saat `close_position`, JS executor sudah **otomatis** men-swap sisa token kembali ke SOL (Dust Sweeping). Tapi LLM murah yang bingung sering memanggil tool `swap_token` lagi secara manual setelahnya.
+**Cara salah (menggunakan lesson):** "RULE: If result says auto_swapped, do not call swap_token."
+**Cara JUNIOR DEV (Hardcode di JS):**
+Buat guard di `swap_token` yang memblokir eksekusi jika di siklus tersebut sudah terjadi auto-swap.
+
+**Implementasi:**
+Di `agent.js` baris 180 (Once Per Session Guard):
+Kode Anda sudah memiliki `ONCE_PER_SESSION = new Set(["deploy_position", "swap_token", "close_position"])`. Ini sudah bagus! Jika LLM panggil swap 2x, yang kedua akan diblok.
+
+Namun, untuk koneksi antara `close_position` dan `swap_token`, tambahkan di `executor.js` bagian eksekusi `swap_token`:
+```javascript
+// Tambahkan di dalam fungsi executeTool("swap_token")
+if (context.hasAutoSwappedThisSession) {
+  return { error: "Already auto-swapped during close_position. Do not call swap_token again." };
+}
+```
+
+### 3. Aturan yang TIDAK BISA Dipindah ke JS (Wajib Tetap Jadi Lesson)
+
+Beberapa hal sangat abstrak dan **hanya bisa** dievaluasi oleh LLM. Untuk inilah 5 slot Pinned Lesson Anda harus dihemat:
+
+1. **Evaluasi Narasi (Narrative):**
+   *Wajib jadi lesson:* "CRITICAL: A token is ONLY valid if narrative is a specific real-world event. 'Community taken over' or 'Next 100x' is fake narrative. SKIP IT."
+   *(JS tidak bisa membaca bahasa manusia).*
+
+2. **Deteksi PVP / Tren Meta:**
+   *Wajib jadi lesson:* "RULE: If there are 3 pools with the same ticker (e.g., TRUMP), DO NOT deploy unless smart wallets confirm the real one."
+   *(JS sulit mendeteksi kemiripan ticker secara kontekstual).*
+
+3. **Penyelarasan Strategi Khusus:**
+   *Wajib jadi lesson:* "MANAGER RULE: Do not close early if PnL is between -10% and +2%. Let it breathe for at least 1 hour to accumulate fees."
+   *(Bisa di-JS, tapi lebih mudah dituning lewat lesson jika ingin mengubah strategi on-the-fly).*
+
+### Ringkasan Eksekusi untuk LLM Murah
+
+| Aturan yang Diinginkan | Jangan Pakai Lesson! Lakukan Ini: | Lokasi File |
+|---|---|---|
+| Paksa amount 0.15 SOL | Timpa `args.amount_y` dengan nilai dari config | `tools/executor.js` (Fungsi deploy) |
+| Cegah spam get_active_bin | Hapus dari daftar `SCREENER_TOOLS` | `agent.js` |
+| Paksa bins_below | Hitung `bins_below` di JS, timpa argumen dari LLM | `tools/executor.js` (Fungsi deploy) |
+| Jangan deploy volatility 0 | Hapus dari array JS *sebelum* dikirim ke LLM | `index.js` (Screening pre-filter) |
+
+**Kesimpulan Utama:**
+Jika sebuah masalah bisa dijawab dengan **"Ya/Tidak"** secara matematis, selesaikan di **JavaScript**.
+Simpan LLM (dan slot lesson) hanya untuk pertanyaan yang butuh **"Kenapa/Bagaimana"** (membaca sentimen narasi, membaca pergerakan smart wallet). Ini akan membuat DeepSeek-v4-flash Anda beroperasi sekelas GPT-4o dengan biaya 1/100-nya.

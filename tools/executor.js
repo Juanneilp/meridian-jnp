@@ -20,7 +20,7 @@ import { addToBlacklist, removeFromBlacklist, listBlacklist } from "../token-bla
 import { blockDev, unblockDev, listBlockedDevs } from "../dev-blocklist.js";
 import { addSmartWallet, removeSmartWallet, listSmartWallets, checkSmartWalletsOnPool } from "../smart-wallets.js";
 import { getTokenInfo, getTokenHolders, getTokenNarrative } from "./token.js";
-import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW } from "../config.js";
+import { config, reloadScreeningThresholds, MIN_SAFE_BINS_BELOW, computeDeployAmount } from "../config.js";
 import { getRecentDecisions } from "../decision-log.js";
 import fs from "fs";
 import { execSync, spawn } from "child_process";
@@ -731,8 +731,12 @@ async function runSafetyChecks(name, args) {
           reason: `bin_step ${args.bin_step} is outside the allowed range of [${minStep}-${maxStep}].`,
         };
       }
+      // Hardcode: Override LLM's requested deploy amount with our config-based computed amount
+      const currentBalance = await getWalletBalances();
+      const deployAmountY = computeDeployAmount(currentBalance.sol);
+      args.amount_y = deployAmountY;
+      args.amount_sol = deployAmountY;
 
-      const deployAmountY = Number(args.amount_y ?? args.amount_sol ?? 0);
       const deployAmountX = Number(args.amount_x ?? 0);
       if (Number.isFinite(deployAmountX) && deployAmountX > 0) {
         return {

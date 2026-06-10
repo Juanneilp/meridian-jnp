@@ -5,7 +5,7 @@ const repoRoot = __dirname;
 module.exports = {
   apps: [
     {
-      name: "meridian",
+      name: "meridian-main",
       script: path.join(repoRoot, "index.js"),
       cwd: repoRoot,
       interpreter: "node",
