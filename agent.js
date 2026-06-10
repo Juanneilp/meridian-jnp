@@ -147,6 +147,11 @@ function isThinkingModeToolChoiceError(error) {
   return /thinking mode does not support/i.test(message) && /tool_choice/i.test(message);
 }
 
+function isOpenRouterToolChoiceError(error) {
+  const message = String(error?.message || error?.error?.message || error || "");
+  return /no endpoints found that support/i.test(message) && /tool_choice/i.test(message);
+}
+
 /**
  * Core ReAct agent loop.
  *
@@ -221,15 +226,15 @@ export async function agentLoop(goal, maxSteps = config.llm.maxSteps, sessionHis
             attempt -= 1;
             continue;
           }
-          if (toolChoice === "required" && isToolChoiceRequiredError(error)) {
+          if (toolChoice === "required" && (isToolChoiceRequiredError(error) || isOpenRouterToolChoiceError(error))) {
             toolChoice = "auto";
             log("agent", "Provider rejected tool_choice=required — retrying with tool_choice=auto");
             attempt -= 1;
             continue;
           }
-          if (!omitToolChoice && isThinkingModeToolChoiceError(error)) {
+          if (!omitToolChoice && (isThinkingModeToolChoiceError(error) || isOpenRouterToolChoiceError(error))) {
             omitToolChoice = true;
-            log("agent", "Provider thinking mode does not support tool_choice — retrying without it");
+            log("agent", "Provider thinking mode or endpoint does not support tool_choice — retrying without it");
             attempt -= 1;
             continue;
           }
