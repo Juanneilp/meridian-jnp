@@ -54,7 +54,7 @@ const INTENT_PATTERNS = [
   { intent: "claim",       re: /\b(claim|harvest|collect)\b.*\bfee/i },
   { intent: "swap",        re: /\b(swap|convert|sell|exchange)\b/i },
   { intent: "selfupdate",  re: /\b(self.?update|git pull|pull latest|update (the )?bot|update (the )?agent|update yourself)\b/i },
-  { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer)\b/i },
+  { intent: "blocklist",   re: /\b(blacklist|block|unblock|blocklist|blocked deployer|rugger|block dev|block deployer|banned|ban)\b/i },
   { intent: "config",      re: /\b(config|setting|threshold|update|set |change)\b/i },
   { intent: "balance",     re: /\b(balance|wallet|sol|how much)\b/i },
   { intent: "positions",   re: /\b(position|portfolio|open|pnl|yield|range)\b/i },
