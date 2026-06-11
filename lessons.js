@@ -44,6 +44,41 @@ function sanitizeLessonText(text, maxLen = MAX_MANUAL_LESSON_LENGTH) {
   return cleaned || null;
 }
 
+/**
+ * Mengecek kemiripan teks menggunakan Bi-gram Jaccard Similarity.
+ * Mencegah bertambahnya pelajaran berulang di memori (deduplication).
+ */
+function isSimilarLesson(newRule, existingLessons, threshold = 0.85) {
+  const getBigrams = (str) => {
+    const s = str.toLowerCase().replace(/\s+/g, "");
+    const bg = new Set();
+    for(let i = 0; i < s.length - 1; i++) {
+      bg.add(s.slice(i, i + 2));
+    }
+    return bg;
+  };
+  
+  const bg1 = getBigrams(newRule);
+  if (bg1.size === 0) return false;
+  
+  // Iterasi dari belakang (paling baru) agar lebih cepat menemukan kemiripan
+  for (let i = existingLessons.length - 1; i >= 0; i--) {
+    const lesson = existingLessons[i];
+    const bg2 = getBigrams(lesson.rule);
+    if (bg2.size === 0) continue;
+    
+    let intersection = 0;
+    for (const b of bg1) {
+      if (bg2.has(b)) intersection++;
+    }
+    const union = bg1.size + bg2.size - intersection;
+    const sim = union === 0 ? 0 : intersection / union;
+    
+    if (sim >= threshold) return true;
+  }
+  return false;
+}
+
 function load() {
   if (!fs.existsSync(LESSONS_FILE)) {
     return { lessons: [], performance: [] };
@@ -147,10 +182,16 @@ export async function recordPerformance(perf) {
   data.performance.push(entry);
 
   // Derive and store a lesson
-  const lesson = derivLesson(entry);
+  let lesson = derivLesson(entry);
   if (lesson) {
-    data.lessons.push(lesson);
-    log("lessons", `New lesson: ${lesson.rule}`);
+    // Cek apakah pelajaran ini sudah ada di database (kemiripan 85%)
+    if (!isSimilarLesson(lesson.rule, data.lessons, 0.85)) {
+      data.lessons.push(lesson);
+      log("lessons", `New lesson: ${lesson.rule}`);
+    } else {
+      log("lessons", `Skipped duplicate lesson: ${lesson.rule.slice(0, 60)}...`);
+      lesson = null; // Gagalkan sinkronisasi ke HiveMind jika duplikat
+    }
   }
 
   save(data);
@@ -486,6 +527,13 @@ export function addLesson(rule, tags = [], { pinned = false, role = null } = {})
   const safeRule = sanitizeLessonText(rule);
   if (!safeRule) return;
   const data = load();
+  
+  // Cek kemiripan sebelum menambahkan pelajaran manual
+  if (isSimilarLesson(safeRule, data.lessons, 0.90)) {
+    log("lessons", `Skipped duplicate manual lesson: ${safeRule.slice(0, 60)}...`);
+    return;
+  }
+
   const lesson = {
     id: Date.now(),
     rule: safeRule,

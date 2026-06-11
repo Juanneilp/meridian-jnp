@@ -289,7 +289,7 @@ export async function runManagementCycle({ silent = false } = {}) {
           }
           continue;
         }
-        exitMap.set(p.position, exit.reason);
+        exitMap.set(p.position, exit);
         log("state", `Exit alert for ${p.pair}: ${exit.reason}`);
       }
     }
@@ -298,9 +298,16 @@ export async function runManagementCycle({ silent = false } = {}) {
     // action: CLOSE | CLAIM | STAY | INSTRUCTION (needs LLM)
     const actionMap = new Map();
     for (const p of positionData) {
+      const isUnmanagedManual = p.creator === "manual" && !p.allow_management;
+      if (isUnmanagedManual) {
+        actionMap.set(p.position, { action: "STAY" });
+        continue;
+      }
+
       // Hard exit — highest priority
       if (exitMap.has(p.position)) {
-        actionMap.set(p.position, { action: "CLOSE", rule: "exit", reason: exitMap.get(p.position) });
+        const exitObj = exitMap.get(p.position);
+        actionMap.set(p.position, { action: "CLOSE", rule: exitObj.action, reason: exitObj.reason });
         continue;
       }
       // Instruction-set — pass to LLM, can't parse in JS
@@ -336,8 +343,14 @@ export async function runManagementCycle({ silent = false } = {}) {
       const lock = p.creator === "manual" ? (p.allow_management ? " (managed)" : " 🔒") : "";
       let line = `${icon} **${p.pair}**${lock} | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
-      if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
-      if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
+      if (act.action === "CLOSE") {
+        if (act.rule === "TRAILING_TP") line += `\n⚡ Trailing TP: ${act.reason}`;
+        else if (act.rule === "STOP_LOSS") line += `\n🚨 Stop Loss: ${act.reason}`;
+        else if (act.rule === "OUT_OF_RANGE") line += `\n⚠️ Out of Range: ${act.reason}`;
+        else if (act.rule === "LOW_YIELD") line += `\n📉 Low Yield: ${act.reason}`;
+        else if (act.rule && typeof act.rule === "number") line += `\nRule ${act.rule}: ${act.reason}`;
+        else if (act.rule) line += `\n⚡ Exit Alert: ${act.reason}`;
+      }
       if (act.action === "CLAIM") line += `\n→ Claiming fees`;
       return line;
     });
@@ -366,7 +379,7 @@ export async function runManagementCycle({ silent = false } = {}) {
         return [
           `POSITION: ${p.pair} (${p.position})`,
           `  pool: ${p.pool}`,
-          `  action: ${act.action}${act.rule && act.rule !== "exit" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule === "exit" ? ` — ⚡ Trailing TP: ${act.reason}` : ""}`,
+          `  action: ${act.action}${act.rule && typeof act.rule === "number" ? ` — Rule ${act.rule}: ${act.reason}` : ""}${act.rule && typeof act.rule !== "number" ? ` — ⚡ Exit Alert (${act.rule}): ${act.reason}` : ""}`,
           `  pnl_pct: ${p.pnl_pct}% | unclaimed_fees: ${cur}${p.unclaimed_fees_usd} | value: ${cur}${p.total_value_usd} | fee_per_tvl_24h: ${p.fee_per_tvl_24h ?? "?"}%`,
           `  bins: lower=${p.lower_bin} upper=${p.upper_bin} active=${p.active_bin} | oor_minutes: ${p.minutes_out_of_range ?? 0}`,
           p.instruction ? `  instruction: "${p.instruction}"` : null,
@@ -919,6 +932,9 @@ function formatCandidates(candidates) {
 
 function getDeterministicCloseRule(position, managementConfig) {
   const tracked = getTrackedPosition(position.position);
+  if (tracked?.creator === "manual" && !tracked?.allow_management) {
+    return null;
+  }
   const pnlSuspect = (() => {
     if (position.pnl_pct == null) return false;
     if (position.pnl_pct > -90) return false;
