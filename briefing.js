@@ -1,6 +1,7 @@
 import fs from "fs";
 import { log } from "./logger.js";
 import { getPerformanceSummary } from "./lessons.js";
+import { escapeHtml } from "./telegram.js";
 import { repoPath } from "./repo-root.js";
 
 const STATE_FILE = repoPath("state.json");
@@ -32,30 +33,32 @@ export async function generateBriefing() {
 
   // 5. Format Message
   const lines = [
-    "☀️ <b>Morning Briefing</b> (Last 24h)",
-    "────────────────",
-    `<b>Activity:</b>`,
-    `📥 Positions Opened: ${openedLast24h.length}`,
-    `📤 Positions Closed: ${closedLast24h.length}`,
+    "☀️ <b>Morning Briefing</b>",
+    `📅 ${now.toISOString().slice(0, 10)}`,
+    "─────────────────",
     "",
-    `<b>Performance:</b>`,
-    `💰 Net PnL: ${totalPnLUsd >= 0 ? "+" : ""}$${totalPnLUsd.toFixed(2)}`,
-    `💎 Fees Earned: $${totalFeesUsd.toFixed(2)}`,
+    "📊 <b>Activity (24h)</b>",
+    `   📥 Opened: <b>${openedLast24h.length}</b>`,
+    `   📤 Closed: <b>${closedLast24h.length}</b>`,
+    "",
+    "💰 <b>Performance (24h)</b>",
+    `   ${totalPnLUsd >= 0 ? "🟢" : "🔴"} Net PnL: <b>${totalPnLUsd >= 0 ? "+" : ""}$${totalPnLUsd.toFixed(2)}</b>`,
+    `   💎 Fees: <b>$${totalFeesUsd.toFixed(2)}</b>`,
     perfLast24h.length > 0
-      ? `📈 Win Rate (24h): ${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%`
-      : "📈 Win Rate (24h): N/A",
+      ? `   📈 Win Rate: <b>${Math.round((perfLast24h.filter(p => p.pnl_usd > 0).length / perfLast24h.length) * 100)}%</b> (${perfLast24h.length} trades)`
+      : "   📈 Win Rate: N/A",
     "",
-    `<b>Lessons Learned:</b>`,
+    "🧠 <b>Lessons Learned</b>",
     lessonsLast24h.length > 0
-      ? lessonsLast24h.map(l => `• ${l.rule}`).join("\n")
-      : "• No new lessons recorded overnight.",
+      ? lessonsLast24h.slice(0, 5).map(l => `   • ${escapeHtml(l.rule.slice(0, 80))}`).join("\n")
+      : "   • No new lessons",
     "",
-    `<b>Current Portfolio:</b>`,
-    `📂 Open Positions: ${openPositions.length}`,
+    "📂 <b>Portfolio</b>",
+    `   Open: <b>${openPositions.length}</b> positions`,
     perfSummary
-      ? `📊 All-time PnL: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win)`
+      ? `   All-time: $${perfSummary.total_pnl_usd.toFixed(2)} (${perfSummary.win_rate_pct}% win rate)`
       : "",
-    "────────────────"
+    "─────────────────",
   ];
 
   return lines.join("\n");

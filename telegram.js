@@ -414,6 +414,7 @@ const BOT_COMMANDS = [
   { command: "wallet",     description: "Wallet, deploy amount, HiveMind status" },
   { command: "positions",  description: "List open positions" },
   { command: "pool",       description: "Detailed info for one open position" },
+  { command: "manage",     description: "Allow/disallow Meridian management for manual position" },
   { command: "close",      description: "Close one position by index" },
   { command: "closeall",   description: "Close all open positions" },
   { command: "set",        description: "Set note/instruction on position" },
@@ -425,6 +426,7 @@ const BOT_COMMANDS = [
   { command: "deploy",     description: "Deploy candidate by cached index" },
   { command: "briefing",   description: "Morning briefing" },
   { command: "hive",       description: "HiveMind sync status" },
+  { command: "perf",       description: "Performance dashboard" },
   { command: "pause",      description: "Stop cron cycles" },
   { command: "resume",     description: "Start cron cycles again" },
   { command: "stop",       description: "Shut down agent" },
@@ -460,53 +462,106 @@ export function stopPolling() {
   _polling = false;
 }
 
-// ─── Notification helpers ────────────────────────────────────────
-export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee }) {
+export async function notifyDeploy({ pair, amountSol, position, tx, priceRange, rangeCoverage, binStep, baseFee, pool }) {
   if (hasActiveLiveMessage()) return;
-  const priceStr = priceRange
-    ? `Price range: ${priceRange.min < 0.0001 ? priceRange.min.toExponential(3) : priceRange.min.toFixed(6)} – ${priceRange.max < 0.0001 ? priceRange.max.toExponential(3) : priceRange.max.toFixed(6)}\n`
-    : "";
-  const coverageStr = rangeCoverage
-    ? `Range cover: ${fmtPct(rangeCoverage.downside_pct)} downside | ${fmtPct(rangeCoverage.upside_pct)} upside | ${fmtPct(rangeCoverage.width_pct)} total\n`
-    : "";
-  const poolStr = (binStep || baseFee)
-    ? `Bin step: ${binStep ?? "?"}  |  Base fee: ${baseFee != null ? baseFee + "%" : "?"}\n`
-    : "";
-  await sendHTML(
-    `✅ <b>Deployed</b> ${pair}\n` +
-    `Amount: ${amountSol} SOL\n` +
-    priceStr +
-    coverageStr +
-    poolStr +
-    `Position: <code>${position?.slice(0, 8)}...</code>\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
-  );
+  const parts = [
+    `✅ <b>Deployed</b> ${escapeHtml(pair)}`,
+    separator(),
+    `💰 Amount: <b>${amountSol} SOL</b>`,
+  ];
+  if (priceRange) {
+    const fmtPrice = (p) => p < 0.0001 ? p.toExponential(3) : p.toFixed(6);
+    parts.push(`📊 Price: ${fmtPrice(priceRange.min)} → ${fmtPrice(priceRange.max)}`);
+  }
+  if (rangeCoverage) {
+    parts.push(`📐 Range: ${fmtPct(rangeCoverage.downside_pct)}↓ | ${fmtPct(rangeCoverage.upside_pct)}↑ | ${fmtPct(rangeCoverage.width_pct)} total`);
+  }
+  if (binStep || baseFee) {
+    parts.push(`⚙️ Bin step: ${binStep ?? "?"} | Base fee: ${baseFee != null ? baseFee + "%" : "?"}`);
+  }
+  parts.push(separator());
+  parts.push(`🔗 Position: ${solscanAccount(position, position?.slice(0, 12) + "…")}`);
+  if (pool) parts.push(`📎 ${meteoraPool(pool)}`);
+  parts.push(`📝 Tx: ${solscanTx(tx)}`);
+  await sendHTML(parts.join("\n"));
 }
 
-export async function notifyClose({ pair, pnlUsd, pnlPct }) {
+export async function notifyClose({ pair, pnlUsd, pnlPct, feesEarnedUsd, minutesHeld, tx, pool }) {
   if (hasActiveLiveMessage()) return;
+  const emoji = pnlEmoji(pnlUsd);
   const sign = pnlUsd >= 0 ? "+" : "";
-  await sendHTML(
-    `🔒 <b>Closed</b> ${pair}\n` +
-    `PnL: ${sign}$${(pnlUsd ?? 0).toFixed(2)} (${sign}${(pnlPct ?? 0).toFixed(2)}%)`
-  );
+  const parts = [
+    `🔒 <b>Closed</b> ${escapeHtml(pair)}`,
+    separator(),
+    `${emoji} PnL: <b>${sign}$${(pnlUsd ?? 0).toFixed(2)}</b> (${sign}${(pnlPct ?? 0).toFixed(2)}%)`,
+  ];
+  if (feesEarnedUsd != null) parts.push(`💎 Fees earned: $${feesEarnedUsd.toFixed(2)}`);
+  if (minutesHeld != null) parts.push(`⏱ Held for: ${minutesHeld}m`);
+  if (tx) parts.push(`📝 Tx: ${solscanTx(tx)}`);
+  if (pool) parts.push(`📎 ${meteoraPool(pool)}`);
+  await sendHTML(parts.join("\n"));
 }
 
 export async function notifySwap({ inputSymbol, outputSymbol, amountIn, amountOut, tx }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `🔄 <b>Swapped</b> ${inputSymbol} → ${outputSymbol}\n` +
+    `🔄 <b>Swapped</b> ${escapeHtml(inputSymbol)} → ${escapeHtml(outputSymbol)}\n` +
     `In: ${amountIn ?? "?"} | Out: ${amountOut ?? "?"}\n` +
-    `Tx: <code>${tx?.slice(0, 16)}...</code>`
+    `📝 Tx: ${solscanTx(tx)}`
   );
 }
 
-export async function notifyOutOfRange({ pair, minutesOOR }) {
+export async function notifyOutOfRange({ pair, minutesOOR, pool }) {
   if (hasActiveLiveMessage()) return;
   await sendHTML(
-    `⚠️ <b>Out of Range</b> ${pair}\n` +
-    `Been OOR for ${minutesOOR} minutes`
+    `⚠️ <b>Out of Range</b> ${escapeHtml(pair)}\n` +
+    `Been OOR for ${minutesOOR} minutes` +
+    (pool ? `\n📎 ${meteoraPool(pool)}` : "")
   );
+}
+
+// ─── HTML Formatting Helpers ─────────────────────────────────
+export function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export function bold(text) { return `<b>${escapeHtml(text)}</b>`; }
+export function code(text) { return `<code>${escapeHtml(text)}</code>`; }
+export function italic(text) { return `<i>${escapeHtml(text)}</i>`; }
+export function link(text, url) { return `<a href="${url}">${escapeHtml(text)}</a>`; }
+
+export function solscanTx(tx) {
+  if (!tx) return "n/a";
+  return link(tx.slice(0, 12) + "…", `https://solscan.io/tx/${tx}`);
+}
+
+export function solscanAccount(address, label) {
+  if (!address) return "n/a";
+  return link(label || address.slice(0, 8) + "…", `https://solscan.io/account/${address}`);
+}
+
+export function meteoraPool(poolAddress, label) {
+  if (!poolAddress) return "n/a";
+  return link(label || "View on Meteora", `https://app.meteora.ag/dlmm/${poolAddress}`);
+}
+
+export function pnlEmoji(pnlValue) {
+  if (pnlValue > 0) return "🟢";
+  if (pnlValue < 0) return "🔴";
+  return "⚪";
+}
+
+export function trendArrow(value) {
+  if (value > 0) return "↗️";
+  if (value < 0) return "↘️";
+  return "→";
+}
+
+export function separator() {
+  return "─────────────────";
 }
 
 function sleep(ms) {

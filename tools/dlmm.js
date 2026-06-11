@@ -1223,7 +1223,18 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
     const positions = [];
     for (const pool of pools) {
       for (const positionAddress of (pool.listPositions || [])) {
-        const tracked = getTrackedPosition(positionAddress);
+        let tracked = getTrackedPosition(positionAddress);
+        if (!tracked) {
+          const poolName = `${pool.tokenX}/${pool.tokenY}`;
+          trackPosition({
+            position: positionAddress,
+            pool: pool.poolAddress,
+            pool_name: poolName,
+            creator: "manual",
+            allow_management: false,
+          });
+          tracked = getTrackedPosition(positionAddress);
+        }
         const isOOR = pool.outOfRange || pool.positionsOutOfRange?.includes(positionAddress);
 
         if (isOOR) markOutOfRange(positionAddress);
@@ -1346,6 +1357,8 @@ export async function getMyPositions({ force = false, silent = false, wallet_add
           age_minutes:        binData?.createdAt ? Math.floor((Date.now() - binData.createdAt * 1000) / 60000) : ageFromState,
           minutes_out_of_range: minutesOutOfRange(positionAddress),
           instruction:        tracked?.instruction ?? null,
+          creator:            tracked?.creator ?? "meridian",
+          allow_management:   tracked?.allow_management !== false,
         });
       }
     }

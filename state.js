@@ -73,6 +73,8 @@ export function trackPosition({
   entry_tvl = null,
   entry_volume = null,
   entry_holders = null,
+  creator = "meridian",
+  allow_management = true,
 }) {
   const state = load();
   state.positions[position] = {
@@ -113,6 +115,8 @@ export function trackPosition({
     confirmed_trailing_exit_reason: null,
     confirmed_trailing_exit_until: null,
     trailing_active: false,
+    creator,
+    allow_management,
   };
   pushEvent(state, { action: "deploy", position, pool_name: pool_name || pool });
   save(state);
@@ -209,6 +213,19 @@ export function setPositionInstruction(position_address, instruction) {
   pos.instruction = sanitizeStoredText(instruction);
   save(state);
   log("state", `Position ${position_address} instruction set: ${pos.instruction}`);
+  return true;
+}
+
+/**
+ * Enable or disable Meridian management for a manual position.
+ */
+export function setManagementState(position_address, allow) {
+  const state = load();
+  const pos = state.positions[position_address];
+  if (!pos) return false;
+  pos.allow_management = Boolean(allow);
+  save(state);
+  log("state", `Position ${position_address} management allowed: ${pos.allow_management}`);
   return true;
 }
 
@@ -364,6 +381,8 @@ export function getStateSummary() {
       initial_fee_tvl_24h: p.initial_fee_tvl_24h,
       rebalance_count: p.rebalance_count,
       instruction: p.instruction || null,
+      creator: p.creator || "meridian",
+      allow_management: p.allow_management !== false,
     })),
     last_updated: state.lastUpdated,
     recent_events: (state.recentEvents || []).slice(-10),
@@ -418,8 +437,10 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
 
   if (changed) save(state);
 
+  const isUnmanagedManual = pos.creator === "manual" && !pos.allow_management;
+
   // ── Stop loss ──────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
+  if (!isUnmanagedManual && !pnl_pct_suspicious && currentPnlPct != null && mgmtConfig.stopLossPct != null && currentPnlPct <= mgmtConfig.stopLossPct) {
     return {
       action: "STOP_LOSS",
       reason: `Stop loss: PnL ${currentPnlPct.toFixed(2)}% <= ${mgmtConfig.stopLossPct}%`,
@@ -427,7 +448,7 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
   }
 
   // ── Trailing TP ────────────────────────────────────────────────
-  if (!pnl_pct_suspicious && pos.trailing_active) {
+  if (!isUnmanagedManual && !pnl_pct_suspicious && pos.trailing_active) {
     const dropFromPeak = pos.peak_pnl_pct - currentPnlPct;
     if (dropFromPeak >= mgmtConfig.trailingDropPct) {
       return {
@@ -451,6 +472,8 @@ export function updatePnlAndCheckExits(position_address, positionData, mgmtConfi
       };
     }
   }
+
+  if (isUnmanagedManual) return null;
 
   // ── Low yield (only after position has had time to accumulate fees) ───
   const { age_minutes } = positionData;

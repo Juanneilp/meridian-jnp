@@ -9,7 +9,7 @@ import { getMyPositions, closePosition, getActiveBin } from "./tools/dlmm.js";
 import { getWalletBalances, swapToken } from "./tools/wallet.js";
 import { getTopCandidates } from "./tools/screening.js";
 import { config, reloadScreeningThresholds, computeDeployAmount } from "./config.js";
-import { evolveThresholds, getPerformanceSummary } from "./lessons.js";
+import { evolveThresholds, getPerformanceSummary, getPerformanceHistory } from "./lessons.js";
 import { executeTool, registerCronRestarter } from "./tools/executor.js";
 import {
   startPolling,
@@ -23,9 +23,14 @@ import {
   notifyOutOfRange,
   isEnabled as telegramEnabled,
   createLiveMessage,
+  escapeHtml,
+  solscanAccount,
+  solscanTx,
+  meteoraPool,
+  pnlEmoji
 } from "./telegram.js";
 import { generateBriefing } from "./briefing.js";
-import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop } from "./state.js";
+import { getLastBriefingDate, setLastBriefingDate, getTrackedPosition, getTrackedPositions, setPositionInstruction, updatePnlAndCheckExits, queuePeakConfirmation, resolvePendingPeak, queueTrailingDropConfirmation, resolvePendingTrailingDrop, setManagementState } from "./state.js";
 import { getActiveStrategy } from "./strategy-library.js";
 import { recordPositionSnapshot, recallForPool, addPoolNote } from "./pool-memory.js";
 import { checkSmartWalletsOnPool } from "./smart-wallets.js";
@@ -327,7 +332,9 @@ export async function runManagementCycle({ silent = false } = {}) {
       const val = config.management.solMode ? `◎${p.total_value_usd ?? "?"}` : `$${p.total_value_usd ?? "?"}`;
       const unclaimed = config.management.solMode ? `◎${p.unclaimed_fees_usd ?? "?"}` : `$${p.unclaimed_fees_usd ?? "?"}`;
       const statusLabel = act.action === "INSTRUCTION" ? "HOLD (instruction)" : act.action;
-      let line = `**${p.pair}** | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
+      const icon = p.creator === "meridian" ? "🤖" : "👤";
+      const lock = p.creator === "manual" ? (p.allow_management ? " (managed)" : " 🔒") : "";
+      let line = `${icon} **${p.pair}**${lock} | Age: ${p.age_minutes ?? "?"}m | Val: ${val} | Unclaimed: ${unclaimed} | PnL: ${p.pnl_pct ?? "?"}% | Yield: ${p.fee_per_tvl_24h ?? "?"}% | ${inRange} | ${statusLabel}`;
       if (p.instruction) line += `\nNote: "${p.instruction}"`;
       if (act.action === "CLOSE" && act.rule === "exit") line += `\n⚡ Trailing TP: ${act.reason}`;
       if (act.action === "CLOSE" && act.rule && act.rule !== "exit") line += `\nRule ${act.rule}: ${act.reason}`;
@@ -346,6 +353,7 @@ export async function runManagementCycle({ silent = false } = {}) {
 
     // ── Call LLM only if action needed ──────────────────────────────
     const actionPositions = positionData.filter(p => {
+      if (p.creator === "manual" && !p.allow_management) return false;
       const a = actionMap.get(p.position);
       return a.action !== "STAY";
     });
@@ -993,31 +1001,50 @@ function describeLatestCandidates(limit = 5) {
 
 function formatWalletStatus(wallet, positions) {
   const deployAmount = computeDeployAmount(wallet.sol);
-  const hive = isHiveMindEnabled() ? "on" : "off";
+  const hive = isHiveMindEnabled() ? "🟢 on" : "⚪ off";
   return [
-    `Wallet: ${wallet.sol} SOL ($${wallet.sol_usd})`,
-    `SOL price: $${wallet.sol_price}`,
-    `Open positions: ${positions.total_positions}/${config.risk.maxPositions}`,
-    `Next deploy amount: ${deployAmount} SOL`,
-    `Dry run: ${process.env.DRY_RUN === "true" ? "yes" : "no"}`,
-    `HiveMind: ${hive}`,
+    `💼 <b>Wallet Status</b>`,
+    `─────────────────`,
+    `💰 SOL: <b>${wallet.sol}</b> ($${wallet.sol_usd})`,
+    `📈 SOL price: $${wallet.sol_price}`,
+    `📊 Open positions: <b>${positions.total_positions}/${config.risk.maxPositions}</b>`,
+    `🚀 Next deploy amount: <b>${deployAmount} SOL</b>`,
+    ``,
+    `🧪 Dry run: ${process.env.DRY_RUN === "true" ? "🟢 yes" : "⚪ no"}`,
+    `🧠 HiveMind: ${hive}`,
   ].join("\n");
 }
 
 function formatConfigSnapshot() {
+  const hive = isHiveMindEnabled() ? "🟢 enabled" : "⚪ disabled";
   return [
-    "Config snapshot",
+    "⚙️ <b>Config Snapshot</b>",
+    "─────────────────",
     "",
-    `Strategy: ${config.strategy.strategy} | binsBelow: ${config.strategy.minBinsBelow}-${config.strategy.maxBinsBelow} | default ${config.strategy.defaultBinsBelow}`,
-    `Deploy: ${config.management.deployAmountSol} SOL | gasReserve: ${config.management.gasReserve} | maxPositions: ${config.risk.maxPositions}`,
-    `Stop loss: ${config.management.stopLossPct}% | take profit: ${config.management.takeProfitPct}%`,
-    `Trailing: ${config.management.trailingTakeProfit ? "on" : "off"} | trigger ${config.management.trailingTriggerPct}% | drop ${config.management.trailingDropPct}%`,
-    `OOR: ${config.management.outOfRangeWaitMinutes}m | cooldown ${config.management.oorCooldownTriggerCount}x / ${config.management.oorCooldownHours}h`,
-    `Repeat deploy cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"} | ${config.management.repeatDeployCooldownTriggerCount}x / ${config.management.repeatDeployCooldownHours}h | min fee earned ${config.management.repeatDeployCooldownMinFeeEarnedPct}% | ${config.management.repeatDeployCooldownScope}`,
-    `Yield floor: ${config.management.minFeePerTvl24h}% | min age ${config.management.minAgeBeforeYieldCheck}m`,
-    `Screening: ${config.screening.category} / ${config.screening.timeframe} | TVL ${config.screening.minTvl}-${config.screening.maxTvl}`,
-    `Intervals: manage ${config.schedule.managementIntervalMin}m | screen ${config.schedule.screeningIntervalMin}m`,
-    `HiveMind: ${isHiveMindEnabled() ? "enabled" : "disabled"}${config.hiveMind.agentId ? ` | ${config.hiveMind.agentId}` : ""}`,
+    "<b>Strategy</b>",
+    `   Type: ${config.strategy.strategy}`,
+    `   Bins below: ${config.strategy.minBinsBelow}–${config.strategy.maxBinsBelow} (default: ${config.strategy.defaultBinsBelow})`,
+    "",
+    "<b>Risk</b>",
+    `   Deploy: ${config.management.deployAmountSol} SOL | Gas: ${config.management.gasReserve}`,
+    `   Max positions: ${config.risk.maxPositions}`,
+    `   SL/TP: ${config.management.stopLossPct}% / ${config.management.takeProfitPct}%`,
+    `   Trailing: ${config.management.trailingTakeProfit ? "🟢 on" : "⚪ off"} (trigger ${config.management.trailingTriggerPct}% / drop ${config.management.trailingDropPct}% )`,
+    "",
+    "<b>Position Management</b>",
+    `   OOR wait: ${config.management.outOfRangeWaitMinutes}m | Cooldown: ${config.management.oorCooldownTriggerCount}×/${config.management.oorCooldownHours}h`,
+    `   Repeat cooldown: ${config.management.repeatDeployCooldownEnabled ? "on" : "off"}`,
+    `   Yield floor: ${config.management.minFeePerTvl24h}% | Min age: ${config.management.minAgeBeforeYieldCheck}m`,
+    "",
+    "<b>Screening</b>",
+    `   Category: ${config.screening.category} / ${config.screening.timeframe}`,
+    `   TVL: ${config.screening.minTvl}–${config.screening.maxTvl}`,
+    "",
+    "<b>Schedule</b>",
+    `   Manage: every ${config.schedule.managementIntervalMin}m`,
+    `   Screen: every ${config.schedule.screeningIntervalMin}m`,
+    "",
+    `🌐 HiveMind: ${hive}`,
   ].join("\n");
 }
 
@@ -1204,8 +1231,7 @@ function normalizeMenuValue(key, raw) {
   return parseConfigValue(raw);
 }
 
-async function applySettingsMenuCallback(msg) {
-  const data = msg.callbackData || msg.text || "";
+async function applySettingsMenuCallback(msg, data) {
   const parts = data.split(":");
   const action = parts[1];
   let page = "main";
@@ -1276,28 +1302,35 @@ async function applySettingsMenuCallback(msg) {
 
 function formatHelpText() {
   return [
-    "Telegram commands",
+    "🤖 <b>Meridian LP Agent — Commands</b>",
     "",
-    "/help — show commands",
-    "/status — wallet + positions snapshot",
-    "/wallet — wallet, deploy amount, HiveMind status",
-    "/positions — list open positions",
-    "/pool <n> — detailed info for one open position",
-    "/close <n> — close one position by index",
-    "/closeall — close all open positions",
-    "/set <n> <note> — set note/instruction on position",
-    "/config — show important runtime config",
-    "/settings — button menu for common config",
-    "/setcfg <key> <value> — update persisted config",
-    "/screen — refresh deterministic candidate list",
-    "/candidates — show latest cached candidates",
-    "/deploy <n> — deploy candidate by cached index",
+    "📊 <b>Monitoring</b>",
+    "/status — wallet + positions overview",
+    "/wallet — wallet balance & deploy info",
+    "/positions — list all open positions",
+    "/pool &lt;n&gt; — detail satu posisi",
+    "/perf — performance dashboard",
     "/briefing — morning briefing",
+    "",
+    "⚡ <b>Actions</b>",
+    "/screen — scan candidates baru",
+    "/candidates — lihat cached candidates",
+    "/deploy &lt;n&gt; — deploy candidate by index",
+    "/close &lt;n&gt; — close posisi by index",
+    "/closeall — close semua posisi",
+    "",
+    "⚙️ <b>Configuration</b>",
+    "/config — tampilkan config snapshot",
+    "/settings — interactive settings menu",
+    "/setcfg &lt;key&gt; &lt;value&gt; — update config",
+    "/set &lt;n&gt; &lt;note&gt; — set note pada posisi",
+    "/manage &lt;n&gt; on|off — toggle management",
+    "",
+    "🌐 <b>System</b>",
     "/hive — HiveMind sync status",
-    "/hive pull — manual HiveMind pull now",
-    "/pause — stop cron cycles",
-    "/resume — start cron cycles again",
-    "/stop — shut down agent",
+    "/hive pull — manual HiveMind pull",
+    "/pause — pause autonomous cycles",
+    "/resume — resume autonomous cycles",
   ].join("\n");
 }
 
@@ -1400,12 +1433,42 @@ async function drainTelegramQueue() {
 async function telegramHandler(msg) {
   const text = msg?.text?.trim();
   if (!text) return;
-  if (msg?.isCallback && text.startsWith("cfg:")) {
-    try {
-      await applySettingsMenuCallback(msg);
-    } catch (e) {
-      await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => { });
+  if (msg?.isCallback) {
+    if (text.startsWith("cfg:")) {
+      await applySettingsMenuCallback(msg, text);
+      return;
     }
+    if (text.startsWith("deploy:")) {
+      try {
+        const idx = parseInt(text.split(":")[1]);
+        await answerCallbackQuery(msg.callbackQueryId, "Deploying...");
+        await deployLatestCandidate(idx);
+      } catch (e) {
+        await answerCallbackQuery(msg.callbackQueryId, e.message).catch(() => {});
+      }
+      return;
+    }
+    if (text.startsWith("close_confirm:")) {
+      const posAddress = text.split(":")[1];
+      await answerCallbackQuery(msg.callbackQueryId, "Closing...");
+      try {
+        await closePosition(posAddress, { triggerReason: "operator telegram" });
+        await getMyPositions({ force: true, silent: true }); // refresh cache
+      } catch (e) {
+        await sendMessage(`Error closing position: ${e.message}`).catch(() => {});
+      }
+      return;
+    }
+    if (text === "close_cancel") {
+      await answerCallbackQuery(msg.callbackQueryId, "Cancelled");
+      await editMessage("❌ Close cancelled.", msg.messageId);
+      return;
+    }
+    return;
+  }
+  if (text === "/stop") {
+    await sendMessage("Shutting down...").catch(() => {});
+    await shutdown("telegram command");
     return;
   }
   if (text === "/settings" || text === "/menu" || text === "/configmenu") {
@@ -1433,17 +1496,63 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/help") {
-    await sendMessage(formatHelpText()).catch(() => { });
+    await sendHTML(formatHelpText()).catch(() => { });
     return;
   }
 
-  if (text === "/wallet" || text === "/status") {
+  if (text === "/status") {
+    try {
+      const [wallet, posData] = await Promise.all([
+        getWalletBalances(), 
+        getMyPositions({ force: true })
+      ]);
+      const deployAmount = computeDeployAmount(wallet.sol);
+      const perfSummary = getPerformanceSummary();
+      const hive = isHiveMindEnabled() ? "🟢 on" : "⚪ off";
+      const mode = process.env.DRY_RUN === "true" ? "🧪 DRY RUN" : "🟢 LIVE";
+
+      const parts = [
+        `📡 <b>Status Overview</b>`,
+        `─────────────────`,
+        ``,
+        `💰 <b>Wallet</b>`,
+        `   SOL: <b>${wallet.sol}</b> ($${wallet.sol_usd})`,
+        `   SOL price: $${wallet.sol_price}`,
+        `   Next deploy: ${deployAmount} SOL`,
+        ``,
+        `📊 <b>Positions</b>`,
+        `   Open: <b>${posData.total_positions}/${config.risk.maxPositions}</b>`,
+      ];
+
+      // Tambahkan ringkasan tiap posisi jika ada
+      if (posData.positions?.length > 0) {
+        for (const p of posData.positions) {
+          const emoji = pnlEmoji(p.pnl_usd);
+          const oor = !p.in_range ? " ⚠️OOR" : "";
+          parts.push(`   ${emoji} ${escapeHtml(p.pair)}: $${p.total_value_usd} | PnL ${p.pnl_pct}%${oor}`);
+        }
+      }
+
+      if (perfSummary) {
+        parts.push(``);
+        parts.push(`📈 <b>All-time Performance</b>`);
+        parts.push(`   PnL: $${perfSummary.total_pnl_usd} | Win: ${perfSummary.win_rate_pct}% | Closed: ${perfSummary.total_positions_closed}`);
+      }
+
+      parts.push(``);
+      parts.push(`⚙️ Mode: ${mode} | HiveMind: ${hive}`);
+
+      await sendHTML(parts.join("\n"));
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
+    }
+    return;
+  }
+
+  if (text === "/wallet") {
     try {
       const [wallet, positions] = await Promise.all([getWalletBalances(), getMyPositions({ force: true })]);
-      const suffix = text === "/status" && positions.total_positions
-        ? `\n\nUse /positions for the numbered list.`
-        : "";
-      await sendMessage(`${formatWalletStatus(wallet, positions)}${suffix}`).catch(() => { });
+      await sendHTML(formatWalletStatus(wallet, positions)).catch(() => { });
     } catch (e) {
       await sendMessage(`Error: ${e.message}`).catch(() => { });
     }
@@ -1451,22 +1560,100 @@ async function telegramHandler(msg) {
   }
 
   if (text === "/config") {
-    await sendMessage(formatConfigSnapshot()).catch(() => { });
+    await sendHTML(formatConfigSnapshot()).catch(() => { });
+    return;
+  }
+  
+  if (text === "/perf") {
+    try {
+      const perf = getPerformanceSummary();
+      if (!perf) { await sendHTML("📊 <b>No closed positions yet.</b>"); return; }
+      
+      const last24h = getPerformanceHistory({ hours: 24 });
+      const last7d = getPerformanceHistory({ hours: 168 });
+
+      await sendHTML([
+        `📊 <b>Performance Dashboard</b>`,
+        `─────────────────`,
+        ``,
+        `<b>All-time</b> (${perf.total_positions_closed} trades)`,
+        `   ${pnlEmoji(perf.total_pnl_usd)} PnL: <b>$${perf.total_pnl_usd.toFixed(2)}</b>`,
+        `   📈 Win rate: <b>${perf.win_rate_pct}%</b>`,
+        `   📊 Avg PnL: ${perf.avg_pnl_pct.toFixed(2)}%`,
+        `   🎯 Range efficiency: ${perf.avg_range_efficiency_pct}%`,
+        ``,
+        `<b>24h</b> (${last24h.count} trades)`,
+        `   ${pnlEmoji(last24h.total_pnl_usd)} PnL: $${last24h.total_pnl_usd.toFixed(2)}`,
+        `   Win rate: ${last24h.win_rate_pct ?? "N/A"}%`,
+        ``,
+        `<b>7d</b> (${last7d.count} trades)`,
+        `   ${pnlEmoji(last7d.total_pnl_usd)} PnL: $${last7d.total_pnl_usd.toFixed(2)}`,
+        `   Win rate: ${last7d.win_rate_pct ?? "N/A"}%`,
+      ].join("\n"));
+    } catch (e) {
+      await sendMessage(`Error: ${e.message}`).catch(() => { });
+    }
     return;
   }
 
   if (text === "/positions") {
     try {
       const { positions, total_positions } = await getMyPositions({ force: true });
-      if (total_positions === 0) { await sendMessage("No open positions."); return; }
+      if (total_positions === 0) { await sendHTML("📭 <b>No open positions.</b>"); return; }
       const cur = config.management.solMode ? "◎" : "$";
-      const lines = positions.map((p, i) => {
-        const pnl = p.pnl_usd >= 0 ? `+${cur}${p.pnl_usd}` : `-${cur}${Math.abs(p.pnl_usd)}`;
+      
+      const formatPos = (p, i) => {
+        const emoji = pnlEmoji(p.pnl_usd);
+        const pnlSign = p.pnl_usd >= 0 ? "+" : "";
         const age = p.age_minutes != null ? `${p.age_minutes}m` : "?";
-        const oor = !p.in_range ? " ⚠️OOR" : "";
-        return `${i + 1}. ${p.pair} | ${cur}${p.total_value_usd} | PnL: ${pnl} | fees: ${cur}${p.unclaimed_fees_usd} | ${age}${oor}`;
+        const oor = !p.in_range ? `\n   ⚠️ <i>OOR ${p.minutes_out_of_range ?? 0}m</i>` : "";
+        const icon = p.creator === "meridian" ? "🤖" : "👤";
+        const lock = p.creator === "manual" ? (p.allow_management ? " <i>(managed)</i>" : " 🔒") : "";
+        return [
+          `<b>${i + 1}. ${icon} ${escapeHtml(p.pair)}</b>${lock}`,
+          `   ${emoji} PnL: <b>${pnlSign}${cur}${Math.abs(p.pnl_usd ?? 0).toFixed(2)}</b> (${p.pnl_pct ?? "?"}%)`,
+          `   💎 Fees: ${cur}${p.unclaimed_fees_usd ?? "?"} | 💰 Value: ${cur}${p.total_value_usd ?? "?"}`,
+          `   ⏱ Age: ${age}${oor}`,
+        ].join("\n");
+      };
+
+      const aiPositions = [];
+      const manualPositions = [];
+      
+      positions.forEach((p, i) => {
+        const line = formatPos(p, i);
+        if (p.creator === "manual") manualPositions.push(line);
+        else aiPositions.push(line);
       });
-      await sendMessage(`📊 Open Positions (${total_positions}):\n\n${lines.join("\n")}\n\n/close <n> to close | /set <n> <note> to set instruction`);
+
+      let out = `📊 <b>Open Positions (${total_positions})</b>\n─────────────────\n\n`;
+      if (aiPositions.length > 0) out += `<b>AI Positions</b>\n${aiPositions.join("\n\n")}\n\n`;
+      if (manualPositions.length > 0) out += `<b>Manual Positions</b>\n${manualPositions.join("\n\n")}\n\n`;
+      
+      out += `─────────────────\n`;
+      out += `<i>/close n · /set n note · /pool n</i>`;
+      
+      await sendHTML(out.trim());
+    } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
+    return;
+  }
+
+  const manageMatch = text.match(/^\/manage\s+(\d+)\s+(on|off)$/i);
+  if (manageMatch) {
+    try {
+      const idx = parseInt(manageMatch[1]) - 1;
+      const toggle = manageMatch[2].toLowerCase() === "on";
+      const { positions } = await getMyPositions({ force: true });
+      if (idx < 0 || idx >= positions.length) { await sendMessage("Invalid number. Use /positions first."); return; }
+      const pos = positions[idx];
+      
+      if (pos.creator !== "manual") {
+        await sendMessage(`Position ${idx + 1} is an AI position, management is always ON.`);
+        return;
+      }
+      
+      setManagementState(pos.position, toggle);
+      await sendMessage(`✅ Management for ${pos.pair} turned ${toggle ? "ON" : "OFF"}.`);
     } catch (e) { await sendMessage(`Error: ${e.message}`).catch(() => { }); }
     return;
   }
